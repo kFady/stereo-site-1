@@ -4,21 +4,12 @@ import { Molecule, AnalysisResult, SearchResult } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-/**
- * Client-side caches to avoid redundant API calls and save quota.
- */
 const explanationCache: Record<string, string> = {};
 const resolutionCache: Record<string, SearchResult> = {};
 
-/**
- * Utility to wait for a specified number of milliseconds.
- */
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Helper to retry a function with exponential backoff if a 429 error is encountered.
- */
-async function withRetry<T>(fn: () => Promise<T>, retries = 4, delay = 2500): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, retries = 5, delay = 3500): Promise<T> {
   try {
     return await fn();
   } catch (error: any) {
@@ -27,57 +18,38 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 4, delay = 2500): Pr
       error?.message?.includes('429') || 
       error?.status === 'RESOURCE_EXHAUSTED' ||
       errorString.includes('429') ||
-      errorString.includes('resource_exhausted') ||
       errorString.includes('quota');
 
     if (retries > 0 && isRateLimit) {
-      console.warn(`Quota limit hit. Retrying in ${delay}ms... (${retries} retries left)`);
-      await wait(delay);
-      return withRetry(fn, retries - 1, delay * 2);
+      const jitter = Math.floor(Math.random() * 1500) + 1000;
+      console.warn(`Gemini API Quota alert. Cooling down... Retrying in ${delay + jitter}ms.`);
+      await wait(delay + jitter);
+      return withRetry(fn, retries - 1, delay * 1.8);
     }
     throw error;
   }
 }
 
-/**
- * Get suggestions for chemical names/SMILES based on input.
- * Uses Flash model to minimize costs.
- */
 export async function getSuggestions(input: string): Promise<string[]> {
   if (input.length < 2) return [];
   return withRetry(async () => {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `List 5 common chemical names or SMILES matching "${input}". Return ONLY a JSON array of strings.`,
-      config: {
-        responseMimeType: "application/json",
-      }
+      contents: `List 5 chemical names/SMILES for input "${input}". Return JSON array.`,
+      config: { responseMimeType: "application/json" }
     });
     try {
       const data = JSON.parse(response.text);
       return Array.isArray(data) ? data : [];
-    } catch {
-      return [];
-    }
-  });
+    } catch { return []; }
+  }, 2, 1500);
 }
 
-/**
- * Performs a comprehensive molecular analysis using Gemini.
- * High-accuracy Pro model used for stereochemistry logic.
- */
 export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResult> {
   return withRetry(async () => {
-    const prompt = `Act as an advanced chemical informatics service.
-    Input Molecule: ${JSON.stringify({ atoms: molecule.atoms, bonds: molecule.bonds })}
-    
-    Analysis required:
-    1. SMILES generation and IUPAC naming.
-    2. Complete stereochemistry (R/S, E/Z).
-    3. Detailed VSEPR geometries for all non-hydrogen atoms.
-    4. Predict physical properties (MW, logP, BP, MP, Density).
-    5. Variations (Isomers & Conformations).
-    6. High-quality SDF string for 3D visualization.`;
+    const prompt = `Act as an expert chemical logic engine. 
+    Analyze this structure: ${JSON.stringify({ atoms: molecule.atoms, bonds: molecule.bonds })}
+    Output: IUPAC name, SMILES, R/S configurations for all centers, VSEPR for non-H atoms, Predicted LogP/MW, and a valid 3D SDF string.`;
 
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview",
@@ -166,26 +138,18 @@ export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResul
     const rawData = JSON.parse(response.text);
     const vseprRecord: Record<string, any> = {};
     if (Array.isArray(rawData.vsepr)) {
-      rawData.vsepr.forEach((item: any) => {
-        vseprRecord[item.atomId] = item;
-      });
+      rawData.vsepr.forEach((item: any) => vseprRecord[item.atomId] = item);
     }
-
     return { ...rawData, vsepr: vseprRecord };
   });
 }
 
-/**
- * Resolves a query string into a molecule structure.
- * Uses Flash model and resolutionCache.
- */
 export async function resolveMolecule(query: string): Promise<SearchResult> {
   const normalized = query.trim().toLowerCase();
   if (resolutionCache[normalized]) return resolutionCache[normalized];
 
-  const result = await withRetry(async () => {
-    const prompt = `Convert the chemical name or SMILES "${query}" into a 2D graph.
-    Position the molecule centrally. Return a SearchResult JSON object.`;
+  return withRetry(async () => {
+    const prompt = `Convert chemical "${query}" to a 2D graph with atoms and bonds. Center coordinates at (500,400). Standard bond length 55. Return SearchResult JSON.`;
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: prompt,
@@ -238,25 +202,21 @@ export async function resolveMolecule(query: string): Promise<SearchResult> {
         }
       }
     });
-    return JSON.parse(response.text);
+    const result = JSON.parse(response.text);
+    resolutionCache[normalized] = result;
+    return result;
   });
-
-  resolutionCache[normalized] = result;
-  return result;
 }
 
-/**
- * Fetches academic explanations for chemical concepts.
- */
 export async function getExplanation(topic: string): Promise<string> {
   if (explanationCache[topic]) return explanationCache[topic];
-  const result = await withRetry(async () => {
+  return withRetry(async () => {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Concise academic explanation of "${topic}" for a stereochemistry student.`,
+      contents: `Explain "${topic}" for a chemist in 2 sentences.`,
     });
-    return response.text || "Explanation unavailable.";
+    const txt = response.text || "Reference unavailable.";
+    explanationCache[topic] = txt;
+    return txt;
   });
-  explanationCache[topic] = result;
-  return result;
 }

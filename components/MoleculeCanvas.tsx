@@ -7,8 +7,8 @@ interface MoleculeCanvasProps {
   onMoleculeChange: (molecule: Molecule) => void;
   activeElement: ElementType;
   setActiveElement: (el: ElementType) => void;
-  activeTool: 'atom' | 'bond' | 'eraser' | 'select-central' | 'pan';
-  setActiveTool: (tool: 'atom' | 'bond' | 'eraser' | 'select-central' | 'pan') => void;
+  activeTool: 'atom' | 'bond' | 'eraser' | 'select-central' | 'pan' | 'benzene' | 'double' | 'triple';
+  setActiveTool: (tool: 'atom' | 'bond' | 'eraser' | 'select-central' | 'pan' | 'benzene' | 'double' | 'triple') => void;
   molecule: Molecule;
   onSelectAtom?: (atomId: string) => void;
   onFillHydrogens: () => void;
@@ -20,8 +20,8 @@ export interface MoleculeCanvasHandle {
   zoomOut: () => void;
 }
 
-const HIT_RADIUS = 20;
-const BOND_LENGTH = 50;
+const HIT_RADIUS = 18;
+const BOND_LENGTH = 55;
 
 export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasProps>(({ 
   onMoleculeChange, 
@@ -39,7 +39,6 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
   const [dragStartAtom, setDragStartAtom] = useState<string | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   
-  // Viewport state
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [scale, setScale] = useState(1);
   const [isPanning, setIsPanning] = useState(false);
@@ -94,9 +93,42 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
       const t = ((pos.x - from.x) * (to.x - from.x) + (pos.y - from.y) * (to.y - from.y)) / L2;
       if (t < 0 || t > 1) return false;
       const dist = Math.sqrt((pos.x - (from.x + t * (to.x - from.x))) ** 2 + (pos.y - (from.y + t * (to.y - from.y))) ** 2);
-      return dist < (8 / scale);
+      return dist < (10 / scale);
     });
   }, [molecule.atoms, molecule.bonds, scale]);
+
+  const addBenzene = (centerX: number, centerY: number) => {
+    const angleStep = Math.PI / 3;
+    const newAtoms: Atom[] = [];
+    const newBonds: Bond[] = [];
+    const timestamp = Date.now();
+
+    for (let i = 0; i < 6; i++) {
+      const id = `bz-${timestamp}-${i}`;
+      newAtoms.push({
+        id,
+        element: 'C',
+        x: centerX + Math.cos(i * angleStep) * BOND_LENGTH,
+        y: centerY + Math.sin(i * angleStep) * BOND_LENGTH,
+        formalCharge: 0,
+        lonePairs: 0
+      });
+    }
+
+    for (let i = 0; i < 6; i++) {
+      newBonds.push({
+        id: `bz-bond-${timestamp}-${i}`,
+        from: newAtoms[i].id,
+        to: newAtoms[(i + 1) % 6].id,
+        type: i % 2 === 0 ? 'double' : 'single'
+      });
+    }
+
+    onMoleculeChange({
+      atoms: [...molecule.atoms, ...newAtoms],
+      bonds: [...molecule.bonds, ...newBonds]
+    });
+  };
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -109,21 +141,21 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
     ctx.translate(offset.x, offset.y);
     ctx.scale(scale, scale);
 
-    // Draw Grid (Lightly)
-    ctx.strokeStyle = '#f1f5f9';
+    // Drawing Grid
+    ctx.strokeStyle = '#f8fafc';
     ctx.lineWidth = 1 / scale;
-    const step = 40;
-    const gridBound = 3000;
+    const step = 50;
+    const gridBound = 5000;
     for (let i = -gridBound; i < gridBound; i += step) {
       ctx.beginPath(); ctx.moveTo(i, -gridBound); ctx.lineTo(i, gridBound); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(-gridBound, i); ctx.lineTo(gridBound, i); ctx.stroke();
     }
 
-    // Preview for new bond
-    if (activeTool === 'bond' && dragStartAtom) {
+    // Ghost Preview
+    if (['bond', 'double', 'triple'].includes(activeTool) && dragStartAtom) {
       const from = molecule.atoms.find(a => a.id === dragStartAtom);
       if (from) {
-        ctx.strokeStyle = '#94a3b8';
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.4)';
         ctx.setLineDash([5, 5]);
         ctx.lineWidth = 1.5 / scale;
         ctx.beginPath();
@@ -134,20 +166,20 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
       }
     }
 
-    // Draw Bonds - Skeletal style
+    // Bonds
     molecule.bonds.forEach(bond => {
       const from = molecule.atoms.find(a => a.id === bond.from);
       const to = molecule.atoms.find(a => a.id === bond.to);
       if (from && to) {
-        ctx.strokeStyle = hoveredBond === bond.id ? '#3b82f6' : '#1e293b';
-        ctx.lineWidth = (hoveredBond === bond.id ? 3 : 1.5) / scale;
+        ctx.strokeStyle = hoveredBond === bond.id ? '#3b82f6' : '#334155';
+        ctx.lineWidth = (hoveredBond === bond.id ? 3 : 1.6) / scale;
         
         if (bond.type === 'single') {
           ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
         } else if (bond.type === 'double') {
           const dx = to.x - from.x; const dy = to.y - from.y;
           const len = Math.sqrt(dx * dx + dy * dy);
-          const gap = 3 / scale;
+          const gap = 3.5 / scale;
           const ox = (-dy / len) * gap; const oy = (dx / len) * gap;
           ctx.beginPath(); ctx.moveTo(from.x + ox, from.y + oy); ctx.lineTo(to.x + ox, to.y + oy); ctx.stroke();
           ctx.beginPath(); ctx.moveTo(from.x - ox, from.y - oy); ctx.lineTo(to.x - ox, to.y - oy); ctx.stroke();
@@ -163,26 +195,32 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
       }
     });
 
-    // Draw Atoms - Skeletal style (No carbon letters, no circles)
+    // Atoms (Skeletal Carbon logic)
     molecule.atoms.forEach(atom => {
+      const bondsCount = molecule.bonds.filter(b => b.from === atom.id || b.to === atom.id).length;
       const isSelected = activeTool === 'select-central' && hoveredAtom === atom.id;
       
-      if (isSelected) {
-        ctx.fillStyle = 'rgba(59, 130, 246, 0.2)';
-        ctx.beginPath(); ctx.arc(atom.x, atom.y, 10 / scale, 0, Math.PI * 2); ctx.fill();
+      if (isSelected || hoveredAtom === atom.id) {
+        ctx.fillStyle = 'rgba(59, 130, 246, 0.1)';
+        ctx.beginPath(); ctx.arc(atom.x, atom.y, 12 / scale, 0, Math.PI * 2); ctx.fill();
       }
 
-      // Hide 'C' for skeletal structures
-      if (atom.element === 'C') return;
+      // Hide Carbon ('C') if it is bonded to something (Skeletal)
+      // Show Carbon ('C') ONLY if it is isolated (0 bonds)
+      if (atom.element === 'C' && bondsCount > 0) return;
 
-      // Draw non-carbon letters without circles
-      ctx.fillStyle = 'white';
-      ctx.beginPath(); ctx.arc(atom.x, atom.y, 6 / scale, 0, Math.PI * 2); ctx.fill();
+      // Labels (Textbook Style: No circle around letter)
+      ctx.fillStyle = 'white'; // White background for the letter only to break the bond lines
+      ctx.font = `bold ${14 / scale}px "Inter", sans-serif`;
+      const txt = atom.element;
+      const m = ctx.measureText(txt);
+      const w = m.width + (2 / scale);
+      const h = 10 / scale;
+      ctx.fillRect(atom.x - w / 2, atom.y - h / 2, w, h);
 
       ctx.fillStyle = ELEMENTS[atom.element]?.color || '#000';
-      ctx.font = `bold ${12 / scale}px sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(atom.element, atom.x, atom.y);
+      ctx.fillText(txt, atom.x, atom.y);
     });
 
     ctx.restore();
@@ -191,13 +229,19 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
   useEffect(() => { draw(); }, [draw]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    const pos = getRelativePos(e);
     if (activeTool === 'pan') {
       setIsPanning(true);
       setPanStart({ x: e.clientX, y: e.clientY });
       return;
     }
 
-    const pos = getRelativePos(e);
+    if (activeTool === 'benzene') {
+      addBenzene(pos.x, pos.y);
+      setActiveTool('pan');
+      return;
+    }
+
     const atom = getAtomAt(pos);
     const bond = getBondAt(pos);
 
@@ -218,11 +262,10 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
       return;
     }
 
-    if (activeTool === 'bond') {
+    if (['bond', 'double', 'triple'].includes(activeTool)) {
       if (bond) {
-        const types: Bond['type'][] = ['single', 'double', 'triple'];
-        const nextType = types[(types.indexOf(bond.type) + 1) % types.length];
-        onMoleculeChange({ ...molecule, bonds: molecule.bonds.map(b => b.id === bond.id ? { ...b, type: nextType } : b) });
+        const typeMap: Record<string, Bond['type']> = { 'bond': 'single', 'double': 'double', 'triple': 'triple' };
+        onMoleculeChange({ ...molecule, bonds: molecule.bonds.map(b => b.id === bond.id ? { ...b, type: typeMap[activeTool] } : b) });
       } else if (atom) {
         setDragStartAtom(atom.id);
       } else {
@@ -241,13 +284,10 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (isPanning) {
-      const dx = e.clientX - panStart.x;
-      const dy = e.clientY - panStart.y;
-      setOffset(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      setOffset(prev => ({ x: prev.x + (e.clientX - panStart.x), y: prev.y + (e.clientY - panStart.y) }));
       setPanStart({ x: e.clientX, y: e.clientY });
       return;
     }
-
     const pos = getRelativePos(e);
     setMousePos(pos);
     setHoveredAtom(getAtomAt(pos)?.id || null);
@@ -257,7 +297,7 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
   const handleMouseUp = (e: React.MouseEvent) => {
     if (isPanning) { setIsPanning(false); return; }
 
-    if (activeTool === 'bond' && dragStartAtom) {
+    if (['bond', 'double', 'triple'].includes(activeTool) && dragStartAtom) {
       const rawPos = getRelativePos(e);
       const startAtom = molecule.atoms.find(a => a.id === dragStartAtom);
       if (!startAtom) return;
@@ -266,19 +306,18 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
       if (targetAtom && targetAtom.id !== dragStartAtom) {
         const exists = molecule.bonds.some(b => (b.from === dragStartAtom && b.to === targetAtom.id) || (b.to === dragStartAtom && b.from === targetAtom.id));
         if (!exists) {
-          onMoleculeChange({ ...molecule, bonds: [...molecule.bonds, { id: `bond-${Date.now()}`, from: dragStartAtom, to: targetAtom.id, type: 'single' }] });
+          const typeMap: Record<string, Bond['type']> = { 'bond': 'single', 'double': 'double', 'triple': 'triple' };
+          onMoleculeChange({ ...molecule, bonds: [...molecule.bonds, { id: `bond-${Date.now()}`, from: dragStartAtom, to: targetAtom.id, type: typeMap[activeTool] }] });
         }
       } else if (!targetAtom) {
-        // Implement "less than 4 atoms attached" 60-degree snap logic
-        const degree = molecule.bonds.filter(b => b.from === dragStartAtom || b.to === dragStartAtom).length;
-        
+        const attached = molecule.bonds.filter(b => b.from === dragStartAtom || b.to === dragStartAtom).length;
         const dx = rawPos.x - startAtom.x;
         const dy = rawPos.y - startAtom.y;
         let angle = Math.atan2(dy, dx);
         
-        // If degree < 4, snap to 60-degree increments
-        if (degree < 4) {
-          const snap = Math.PI / 3; // 60 degrees
+        // 60-degree snap for first 4 bonds
+        if (attached < 4) {
+          const snap = Math.PI / 3;
           angle = Math.round(angle / snap) * snap;
         }
 
@@ -288,9 +327,10 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
         };
 
         const newId = `atom-${Date.now()}`;
+        const typeMap: Record<string, Bond['type']> = { 'bond': 'single', 'double': 'double', 'triple': 'triple' };
         onMoleculeChange({
           atoms: [...molecule.atoms, { id: newId, element: activeElement, ...finalPos, formalCharge: 0, lonePairs: 0 }],
-          bonds: [...molecule.bonds, { id: `bond-${Date.now()}`, from: dragStartAtom, to: newId, type: 'single' }]
+          bonds: [...molecule.bonds, { id: `bond-${Date.now()}`, from: dragStartAtom, to: newId, type: typeMap[activeTool] }]
         });
       }
     }
@@ -299,29 +339,33 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
 
   return (
     <div className="relative w-full h-full flex overflow-hidden bg-white">
-      {/* Sidebar Controls */}
-      <div className="absolute left-2 top-2 bottom-2 w-12 bg-white/95 backdrop-blur-md border border-slate-200 rounded-xl z-20 flex flex-col items-center py-4 space-y-3 shadow-sm overflow-y-auto">
-        <ToolButton active={activeTool === 'pan'} onClick={() => setActiveTool('pan')} icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11"/></svg>} label="Hand" />
+      {/* TOOLBAR LEFT */}
+      <div className="absolute left-4 top-4 bottom-4 w-12 bg-white/95 border border-slate-200 rounded-2xl z-20 flex flex-col items-center py-5 space-y-4 shadow-xl">
+        <ToolButton active={activeTool === 'pan'} onClick={() => setActiveTool('pan')} icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}/></svg>} label="Hand" />
+        <div className="w-8 h-px bg-slate-100"></div>
         <ToolButton active={activeTool === 'atom'} onClick={() => setActiveTool('atom')} icon={<Icons.Atom />} label="Atom" />
-        <ToolButton active={activeTool === 'bond'} onClick={() => setActiveTool('bond')} icon={<Icons.Bond />} label="Bond" />
-        <ToolButton active={activeTool === 'select-central'} onClick={() => setActiveTool('select-central')} icon={<svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5"/></svg>} label="Target" />
-        <ToolButton active={activeTool === 'eraser'} onClick={() => setActiveTool('eraser')} icon={<svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>} label="Erase" />
-        <div className="h-px w-6 bg-slate-200 my-1"></div>
-        <button onClick={() => setScale(prev => Math.min(prev * 1.2, 5))} className="p-2 text-slate-400 hover:text-blue-600 rounded-lg flex flex-col items-center transition-all" title="Zoom In">
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
-        </button>
-        <button onClick={() => setScale(prev => Math.max(prev / 1.2, 0.2))} className="p-2 text-slate-400 hover:text-blue-600 rounded-lg flex flex-col items-center transition-all" title="Zoom Out">
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 12H6"/></svg>
+        <ToolButton active={activeTool === 'bond'} onClick={() => setActiveTool('bond')} icon={<div className="w-5 h-0.5 bg-current rounded-full"></div>} label="Single" />
+        <ToolButton active={activeTool === 'double'} onClick={() => setActiveTool('double')} icon={<div className="flex flex-col space-y-1"><div className="w-5 h-0.5 bg-current rounded-full"></div><div className="w-5 h-0.5 bg-current rounded-full"></div></div>} label="Double" />
+        <ToolButton active={activeTool === 'triple'} onClick={() => setActiveTool('triple')} icon={<div className="flex flex-col space-y-1"><div className="w-5 h-0.5 bg-current rounded-full"></div><div className="w-5 h-0.5 bg-current rounded-full"></div><div className="w-5 h-0.5 bg-current rounded-full"></div></div>} label="Triple" />
+        <ToolButton active={activeTool === 'benzene'} onClick={() => setActiveTool('benzene')} icon={<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2l8.66 5v10L12 22l-8.66-5V7L12 2z"/><path d="M12 6l5.2 3m0 6l-5.2 3m-5.2-3L12 6"/></svg>} label="Benzene" />
+        <div className="flex-grow"></div>
+        <ToolButton active={activeTool === 'eraser'} onClick={() => setActiveTool('eraser')} icon={<svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}/></svg>} label="Eraser" />
+        <button 
+          onClick={() => onMoleculeChange({atoms:[], bonds:[]})}
+          className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
+          title="Clear Canvas"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}/></svg>
         </button>
       </div>
 
-      {/* Element Picker */}
-      <div className="absolute right-2 top-2 w-10 bg-white/95 backdrop-blur border border-slate-200 rounded-xl z-20 flex flex-col items-center py-2 space-y-1 shadow-sm overflow-y-auto">
-        {['C', 'H', 'O', 'N', 'P', 'S', 'F', 'Cl', 'Br', 'I'].map(el => (
+      {/* ELEMENT SELECTOR RIGHT */}
+      <div className="absolute right-4 top-4 w-12 bg-white/95 border border-slate-200 rounded-2xl z-20 flex flex-col items-center py-4 space-y-2 shadow-xl max-h-[80%] overflow-y-auto">
+        {['C', 'H', 'O', 'N', 'F', 'Cl', 'Br', 'I', 'P', 'S'].map(el => (
           <button 
             key={el} 
             onClick={() => { setActiveElement(el as ElementType); setActiveTool('atom'); }} 
-            className={`w-7 h-7 rounded-lg text-[10px] font-black transition-all ${activeElement === el && activeTool === 'atom' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-100'}`}
+            className={`w-9 h-9 rounded-xl text-[11px] font-black transition-all ${activeElement === el && activeTool === 'atom' ? 'bg-blue-600 text-white shadow-lg shadow-blue-200' : 'text-slate-400 hover:bg-slate-50 hover:text-slate-600'}`}
           >
             {el}
           </button>
@@ -330,20 +374,24 @@ export const MoleculeCanvas = forwardRef<MoleculeCanvasHandle, MoleculeCanvasPro
 
       <canvas
         ref={canvasRef}
-        width={800}
-        height={600}
+        width={1000}
+        height={800}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        className={`w-full h-full block touch-none ${activeTool === 'pan' ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-crosshair'}`}
+        className={`w-full h-full block bg-white ${activeTool === 'pan' ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-crosshair'}`}
       />
     </div>
   );
 });
 
-const ToolButton: React.FC<{ active: boolean; onClick: () => void; icon: React.ReactNode; label: string }> = ({ active, onClick, icon, label }) => (
-  <button onClick={onClick} className={`p-2 rounded-lg flex flex-col items-center justify-center transition-all ${active ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-50'}`}>
+const ToolButton: React.FC<{ active: boolean; onClick: () => void; icon: React.ReactNode; label?: string }> = ({ active, onClick, icon, label }) => (
+  <button 
+    onClick={onClick} 
+    className={`p-2.5 rounded-xl transition-all flex flex-col items-center space-y-1 ${active ? 'bg-blue-600 text-white shadow-lg shadow-blue-100' : 'text-slate-400 hover:bg-slate-50'}`}
+    title={label}
+  >
     {icon}
-    <span className="text-[7px] font-black mt-1 uppercase tracking-tighter">{label}</span>
+    {label && <span className="text-[7px] font-black uppercase tracking-tighter">{label}</span>}
   </button>
 );
