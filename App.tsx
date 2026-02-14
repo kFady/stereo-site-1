@@ -8,6 +8,12 @@ import { Molecule, AnalysisResult, ElementType, SearchResult } from './types';
 import { analyzeMolecule, resolveMolecule } from './services/geminiService';
 import { fetchPubChemData, resolveMoleculeFromPubChem, fetch3DSdfFromPubChem } from './services/pubchemService';
 
+const safeStr = (val: any): string => {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'object') return JSON.stringify(val);
+  return String(val);
+};
+
 const App: React.FC = () => {
   const [molecule, setMolecule] = useState<Molecule>({ atoms: [], bonds: [] });
   const [metadata, setMetadata] = useState<SearchResult['metadata'] | null>(null);
@@ -36,10 +42,8 @@ const App: React.FC = () => {
     setIsFallbackMode(false);
 
     try {
-      // 1. Attempt Gemini Analysis
       const result = await analyzeMolecule(targetMol);
       
-      // Enrich with PubChem
       if (result.metadata?.smiles) {
         fetchPubChemData(result.metadata.smiles).then(realProps => {
           setAnalysis(prev => prev ? { ...prev, properties: { ...prev.properties, ...realProps } } : prev);
@@ -51,7 +55,6 @@ const App: React.FC = () => {
     } catch (error: any) {
       console.warn("Gemini Analysis failed, attempting PubChem fallback...", error);
       
-      // 2. Fallback: If we have a name or smiles, get baseline data from PubChem
       const query = metadata?.iupacName || metadata?.smiles || "";
       if (query) {
         try {
@@ -61,7 +64,6 @@ const App: React.FC = () => {
             fetch3DSdfFromPubChem(query)
           ]);
           
-          // Construct a partial analysis result
           const fallbackResult: AnalysisResult = {
             stereocenters: [],
             vsepr: {},
@@ -105,7 +107,6 @@ const App: React.FC = () => {
     setIsAnalyzing(true);
     setErrorMsg(null);
     try {
-      // Try Gemini first
       const result = await resolveMolecule(query);
       onSearchResult(result);
     } catch (e) {
@@ -122,9 +123,14 @@ const App: React.FC = () => {
     }
   }, [onSearchResult]);
 
-  // Fix: Added handleViewAlternative to process isomer/conformer SMILES navigation
-  const handleViewAlternative = useCallback((smiles: string) => {
-    handleSearchSubmit(smiles);
+  const handleViewAlternative = useCallback((alt: any) => {
+    if (alt.sdfData) {
+      // Immediate 3D state update: Swap the SDF data directly for visualizer
+      setAnalysis(prev => prev ? { ...prev, sdfData: alt.sdfData } : prev);
+    } else if (alt.smiles) {
+      // If no SDF, resolve via search logic
+      handleSearchSubmit(alt.smiles);
+    }
   }, [handleSearchSubmit]);
 
   return (
@@ -200,6 +206,18 @@ const App: React.FC = () => {
                     <h2 className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Skeletal Editor</h2>
                     {isFallbackMode && <span className="bg-amber-100 text-amber-700 text-[8px] font-black px-2 py-0.5 rounded-md uppercase tracking-tighter">PubChem Source</span>}
                   </div>
+                  {/* Restored 2D Controls Section */}
+                  <div className="flex items-center space-x-1">
+                    <button onClick={() => canvasRef.current?.zoomIn()} className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-500 transition-colors" title="Zoom In">
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
+                    </button>
+                    <button onClick={() => canvasRef.current?.zoomOut()} className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-500 transition-colors" title="Zoom Out">
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M20 12H4" /></svg>
+                    </button>
+                    <button onClick={() => canvasRef.current?.centerMolecule()} className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-500 transition-colors" title="Center View">
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                    </button>
+                  </div>
                 </div>
                 <MoleculeCanvas 
                   ref={canvasRef}
@@ -232,9 +250,9 @@ const App: React.FC = () => {
              <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
                <h3 className="text-xs font-black uppercase text-blue-600 mb-6 tracking-widest border-b border-blue-50 pb-2">Identification</h3>
                <div className="grid grid-cols-2 gap-x-10 gap-y-6">
-                 <InfoItem label="IUPAC Name" value={metadata?.iupacName} full />
-                 <InfoItem label="Formula" value={metadata?.formula} />
-                 <InfoItem label="SMILES" value={metadata?.smiles} full code />
+                 <InfoItem label="IUPAC Name" value={safeStr(metadata?.iupacName)} full />
+                 <InfoItem label="Formula" value={safeStr(metadata?.formula)} />
+                 <InfoItem label="SMILES" value={safeStr(metadata?.smiles)} full code />
                </div>
              </div>
 
@@ -242,10 +260,10 @@ const App: React.FC = () => {
                <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
                   <h3 className="text-xs font-black uppercase text-blue-600 mb-6 tracking-widest border-b border-blue-50 pb-2">Properties</h3>
                   <div className="space-y-4">
-                     <PropertyRow label="Mol. Weight" value={analysis?.properties?.molecularWeight} />
-                     <PropertyRow label="LogP" value={analysis?.properties?.logP} />
-                     <PropertyRow label="Melting Point" value={analysis?.properties?.meltingPoint} />
-                     <PropertyRow label="Boiling Point" value={analysis?.properties?.boilingPoint} />
+                     <PropertyRow label="Mol. Weight" value={safeStr(analysis?.properties?.molecularWeight)} />
+                     <PropertyRow label="LogP" value={safeStr(analysis?.properties?.logP)} />
+                     <PropertyRow label="Melting Point" value={safeStr(analysis?.properties?.meltingPoint)} />
+                     <PropertyRow label="Boiling Point" value={safeStr(analysis?.properties?.boilingPoint)} />
                   </div>
                </div>
              )}
@@ -253,10 +271,10 @@ const App: React.FC = () => {
              <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
                 <h3 className="text-xs font-black uppercase text-blue-600 mb-6 tracking-widest border-b border-blue-50 pb-2">Topology</h3>
                 <div className="space-y-4">
-                   <PropertyRow label="Atoms" value={molecule.atoms.length.toString()} />
-                   <PropertyRow label="Bonds" value={molecule.bonds.length.toString()} />
-                   <PropertyRow label="Stereocenters" value={analysis?.stereocenters?.length?.toString() || '0'} />
-                   <PropertyRow label="Dipole" value={analysis?.dipoleMoment} />
+                   <PropertyRow label="Atoms" value={safeStr(molecule.atoms.length)} />
+                   <PropertyRow label="Bonds" value={safeStr(molecule.bonds.length)} />
+                   <PropertyRow label="Stereocenters" value={safeStr(analysis?.stereocenters?.length || 0)} />
+                   <PropertyRow label="Dipole" value={safeStr(analysis?.dipoleMoment)} />
                 </div>
              </div>
 

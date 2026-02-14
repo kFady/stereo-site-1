@@ -22,9 +22,6 @@ const cache = {
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Robust retry mechanism with exponential backoff specifically for 429 errors.
- */
 async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 2000): Promise<T> {
   try {
     return await fn();
@@ -33,7 +30,6 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 2000): Pr
     const isRateLimit = errorStr.includes('429') || errorStr.includes('resource_exhausted');
 
     if (retries > 0 && isRateLimit) {
-      // Use longer delays for quota limits
       const backoffDelay = delay + Math.floor(Math.random() * 1000);
       console.warn(`Quota limit reached. Retrying in ${backoffDelay}ms...`);
       await wait(backoffDelay);
@@ -43,6 +39,16 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 2000): Pr
   }
 }
 
+/**
+ * Normalizes input into a string for React rendering safety.
+ */
+const stringify = (val: any): string => {
+  if (!val) return "";
+  if (typeof val === "string") return val;
+  if (typeof val === "object") return val.name || val.text || val.smiles || JSON.stringify(val);
+  return String(val);
+};
+
 export async function getSuggestions(input: string): Promise<string[]> {
   const query = input.trim().toLowerCase();
   if (query.length < 2) return [];
@@ -50,15 +56,21 @@ export async function getSuggestions(input: string): Promise<string[]> {
   return withRetry(async () => {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `List 5 chemical names/SMILES starting with "${input}".`,
+      contents: `List 5 chemical names/SMILES starting with "${input}". Respond ONLY with a JSON array of strings.`,
       config: { 
         responseMimeType: "application/json",
         thinkingConfig: { thinkingBudget: 0 }
       }
     });
     try {
-      const data = JSON.parse(response.text || '[]');
-      return Array.isArray(data) ? data : [];
+      const text = response.text || '[]';
+      let data = JSON.parse(text);
+      
+      // Handle various response formats (bare array, or wrapped object)
+      let list = Array.isArray(data) ? data : (data.suggestions || data.names || []);
+      
+      // Force conversion to strings to prevent React Error #31
+      return list.map((item: any) => stringify(item)).slice(0, 5);
     } catch { return []; }
   }, 1, 1000);
 }
@@ -75,11 +87,13 @@ export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResul
       
       MANDATORY:
       1. Provide accurate IUPAC/SMILES.
-      2. For cyclic structures (e.g. cyclohexane), include stable conformations.
-      3. Return a perfectly valid 3D SDF string in 'sdfData'.
-      4. List stereocenters and VSEPR data for each heavy atom.`,
+      2. The primary 'sdfData' at the top level MUST be the MOST STABLE (lowest energy) 3D conformation.
+      3. In the 'conformations' array, include ALL major distinct stable/metastable states (e.g. for cyclohexane, provide chair, boat, twist-boat). 
+      4. EACH conformation in the array MUST have its own unique V2000 SDF string in its 'sdfData' property. Do not use the same coordinates for all.
+      5. Rank conformations by relative energy.
+      6. List stereocenters and VSEPR data for each heavy atom.`,
       config: {
-        systemInstruction: "You are a professional chemical informatics engine. Always respond in valid JSON. The 'sdfData' field MUST contain a raw V2000 SDF string without markdown code blocks. Ensure coordinates reflect 3D geometry.",
+        systemInstruction: "You are a professional chemical informatics engine. Always respond in valid JSON. The 'sdfData' field MUST contain a raw V2000 SDF string without markdown code blocks. Coordinate data MUST be distinct for each conformation to show spatial differences. Ensure high accuracy for R/S stereochemistry.",
         responseMimeType: "application/json",
         thinkingConfig: { thinkingBudget: 0 },
         responseSchema: {
@@ -112,7 +126,7 @@ export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResul
             },
             dipoleMoment: { type: Type.STRING },
             educationalNote: { type: Type.STRING },
-            sdfData: { type: Type.STRING, description: "Raw V2000 SDF string" },
+            sdfData: { type: Type.STRING, description: "Raw V2000 SDF string (Most Stable)" },
             isomers: {
               type: Type.ARRAY,
               items: {
@@ -121,7 +135,8 @@ export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResul
                   name: { type: Type.STRING },
                   smiles: { type: Type.STRING },
                   type: { type: Type.STRING },
-                  description: { type: Type.STRING }
+                  description: { type: Type.STRING },
+                  sdfData: { type: Type.STRING, description: "3D SDF for this isomer" }
                 }
               }
             },
@@ -133,7 +148,8 @@ export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResul
                   name: { type: Type.STRING },
                   smiles: { type: Type.STRING },
                   energyScore: { type: Type.STRING },
-                  description: { type: Type.STRING }
+                  description: { type: Type.STRING },
+                  sdfData: { type: Type.STRING, description: "Distinct 3D SDF coordinates for this specific state" }
                 }
               }
             },
@@ -163,15 +179,15 @@ export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResul
     const rawData = JSON.parse(response.text || '{}');
     const vseprRecord: Record<string, any> = {};
     if (Array.isArray(rawData.vsepr)) {
-      rawData.vsepr.forEach((item: any) => vseprRecord[item.atomId] = item);
+      rawData.vsepr.forEach((item: any) => vseprRecord[stringify(item.atomId)] = item);
     }
     
     const result = { 
       ...rawData, 
       vsepr: vseprRecord,
-      isomers: rawData.isomers || [],
-      conformations: rawData.conformations || [],
-      stereocenters: rawData.stereocenters || []
+      isomers: Array.isArray(rawData.isomers) ? rawData.isomers : [],
+      conformations: Array.isArray(rawData.conformations) ? rawData.conformations : [],
+      stereocenters: Array.isArray(rawData.stereocenters) ? rawData.stereocenters : []
     };
 
     cache.set(`analysis_${moleculeKey}`, result);

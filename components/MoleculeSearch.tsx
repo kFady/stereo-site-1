@@ -8,6 +8,16 @@ interface MoleculeSearchProps {
   onSearchResult: (result: SearchResult) => void;
 }
 
+/**
+ * Defensive utility to ensure values are renderable as React children.
+ */
+const safeRender = (val: any): string => {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'string') return val;
+  if (typeof val === 'object') return val.name || val.text || val.smiles || JSON.stringify(val);
+  return String(val);
+};
+
 export const MoleculeSearch: React.FC<MoleculeSearchProps> = ({ onSearchResult }) => {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
@@ -126,7 +136,7 @@ export const MoleculeSearch: React.FC<MoleculeSearchProps> = ({ onSearchResult }
               className="w-full text-left px-5 py-4 text-sm hover:bg-blue-600 hover:text-white text-slate-700 font-semibold border-b border-slate-50 last:border-0 transition-all flex items-center group"
             >
               <svg className="w-3 h-3 mr-4 text-slate-300 group-hover:text-blue-200" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M13 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}/></svg>
-              {s}
+              {safeRender(s)}
             </button>
           ))}
         </div>

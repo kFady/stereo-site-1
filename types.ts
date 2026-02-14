@@ -49,6 +49,7 @@ export interface IsomerInfo {
   smiles: string;
   type: 'enantiomer' | 'diastereomer' | 'constitutional';
   description: string;
+  sdfData?: string;
 }
 
 export interface ConformationInfo {
@@ -56,6 +57,7 @@ export interface ConformationInfo {
   smiles: string;
   energyScore: string;
   description: string;
+  sdfData?: string;
 }
 
 export interface AnalysisResult {

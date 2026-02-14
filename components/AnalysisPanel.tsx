@@ -7,17 +7,34 @@ interface AnalysisPanelProps {
   result: AnalysisResult | null;
   loading: boolean;
   selectedCentralAtom: string | null;
-  onViewAlternative: (smiles: string) => void;
+  onViewAlternative: (item: any) => void;
 }
+
+/**
+ * Enhanced safeStr to handle nested LLM objects (e.g. { name: { value: "x" } })
+ */
+const safeStr = (val: any): string => {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'object') {
+    // Try to extract common LLM nested fields if they exist
+    if (val.text) return String(val.text);
+    if (val.value) return String(val.value);
+    if (val.name) return String(val.name);
+    return JSON.stringify(val);
+  }
+  return String(val);
+};
 
 export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, selectedCentralAtom, onViewAlternative }) => {
   if (loading || !result) return null;
 
   const vseprKeys = Object.keys(result.vsepr || {});
-  const displayAtomId = selectedCentralAtom && result.vsepr && result.vsepr[selectedCentralAtom] ? selectedCentralAtom : vseprKeys[0];
+  const displayAtomId = selectedCentralAtom && result.vsepr && result.vsepr[selectedCentralAtom] ? selectedCentralAtom : (vseprKeys.length > 0 ? vseprKeys[0] : null);
   const activeVSEPR = displayAtomId ? result.vsepr[displayAtomId] : null;
 
-  const hasAlternatives = (result.isomers?.length ?? 0) > 0 || (result.conformations?.length ?? 0) > 0;
+  const isomers = Array.isArray(result.isomers) ? result.isomers : [];
+  const conformations = Array.isArray(result.conformations) ? result.conformations : [];
+  const hasAlternatives = isomers.length > 0 || conformations.length > 0;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pb-12">
@@ -26,16 +43,16 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-xs font-black text-blue-600 uppercase tracking-widest">Geometry & VSEPR</h3>
           <span className="bg-blue-50 text-blue-700 text-[10px] font-black px-3 py-1 rounded-full uppercase">
-            {displayAtomId ? `Atom ${displayAtomId}` : 'Main'}
+            {displayAtomId ? `Atom ${safeStr(displayAtomId)}` : 'Main'}
           </span>
         </div>
         {activeVSEPR ? (
           <div className="grid grid-cols-2 gap-4">
-             <GeometryBlock label="AXE Notation" val={activeVSEPR.axeNotation} highlight />
-             <GeometryBlock label="Lone Pairs" val={activeVSEPR.lonePairs?.toString() || '0'} />
-             <GeometryBlock label="Electronic Geo" val={activeVSEPR.electronicGeometry} full />
-             <GeometryBlock label="Molecular Geo" val={activeVSEPR.molecularGeometry} full blue />
-             <GeometryBlock label="Bond Angles" val={activeVSEPR.bondAngles} full />
+             <GeometryBlock label="AXE Notation" val={safeStr(activeVSEPR.axeNotation)} highlight />
+             <GeometryBlock label="Lone Pairs" val={safeStr(activeVSEPR.lonePairs)} />
+             <GeometryBlock label="Electronic Geo" val={safeStr(activeVSEPR.electronicGeometry)} full />
+             <GeometryBlock label="Molecular Geo" val={safeStr(activeVSEPR.molecularGeometry)} full blue />
+             <GeometryBlock label="Bond Angles" val={safeStr(activeVSEPR.bondAngles)} full />
           </div>
         ) : <p className="text-xs text-slate-400 italic">Target an atom for VSEPR data.</p>}
       </section>
@@ -49,10 +66,12 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
           ) : (
             result.stereocenters.map((sc, i) => (
               <div key={i} className="p-3 bg-indigo-50 border border-indigo-100 rounded-xl flex items-start space-x-4">
-                 <div className="bg-indigo-600 text-white w-8 h-8 rounded-lg flex items-center justify-center font-black text-xs">{sc.configuration}</div>
+                 <div className="bg-indigo-600 text-white w-8 h-8 rounded-lg flex items-center justify-center font-black text-xs">
+                   {safeStr(sc.configuration)}
+                 </div>
                  <div className="flex-1">
-                    <p className="text-[10px] font-black text-indigo-700 uppercase">Atom {sc.atomId}</p>
-                    <p className="text-[11px] text-slate-600 leading-tight">{sc.logic}</p>
+                    <p className="text-[10px] font-black text-indigo-700 uppercase">Atom {safeStr(sc.atomId)}</p>
+                    <p className="text-[11px] text-slate-600 leading-tight">{safeStr(sc.logic)}</p>
                  </div>
               </div>
             ))
@@ -65,29 +84,29 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
         <section className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm lg:col-span-2">
           <h3 className="text-xs font-black text-blue-600 uppercase tracking-widest mb-6">Structural Alternatives</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {result.isomers?.map((iso, i) => (
+            {isomers.map((iso, i) => (
               <div key={`iso-${i}`} className="p-4 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center hover:border-blue-200 transition-colors">
-                 <div>
-                   <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">{iso.type}</p>
-                   <p className="text-xs font-bold text-slate-800">{iso.name}</p>
+                 <div className="flex-1 mr-4">
+                   <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">{safeStr(iso.type)}</p>
+                   <p className="text-xs font-bold text-slate-800">{safeStr(iso.name)}</p>
                  </div>
                  <button 
-                  onClick={() => onViewAlternative(iso.smiles)}
-                  className="px-3 py-1 bg-blue-50 text-[10px] font-black text-blue-600 rounded-lg uppercase hover:bg-blue-600 hover:text-white transition-all"
+                  onClick={() => onViewAlternative(iso)}
+                  className="shrink-0 px-3 py-1 bg-blue-50 text-[10px] font-black text-blue-600 rounded-lg uppercase hover:bg-blue-600 hover:text-white transition-all"
                  >
                    Load
                  </button>
               </div>
             ))}
-            {result.conformations?.map((conf, i) => (
+            {conformations.map((conf, i) => (
               <div key={`conf-${i}`} className="p-4 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center hover:border-blue-200 transition-colors">
-                 <div>
-                   <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">Conformational State ({conf.energyScore})</p>
-                   <p className="text-xs font-bold text-slate-800">{conf.name}</p>
+                 <div className="flex-1 mr-4">
+                   <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">Conformational State ({safeStr(conf.energyScore)})</p>
+                   <p className="text-xs font-bold text-slate-800">{safeStr(conf.name)}</p>
                  </div>
                  <button 
-                  onClick={() => onViewAlternative(conf.smiles)}
-                  className="px-3 py-1 bg-indigo-50 text-[10px] font-black text-indigo-600 rounded-lg uppercase hover:bg-indigo-600 hover:text-white transition-all"
+                  onClick={() => onViewAlternative(conf)}
+                  className="shrink-0 px-3 py-1 bg-indigo-50 text-[10px] font-black text-indigo-600 rounded-lg uppercase hover:bg-indigo-600 hover:text-white transition-all"
                  >
                    Apply
                  </button>
@@ -100,7 +119,7 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
       {/* Educational Context */}
       <section className="bg-amber-50 p-6 rounded-2xl border border-amber-100 lg:col-span-2">
          <h4 className="text-[10px] font-black text-amber-800 uppercase tracking-widest mb-2">Faculty Commentary</h4>
-         <p className="text-xs text-amber-700 leading-relaxed italic">{result.educationalNote || 'Standard chemical analysis complete.'}</p>
+         <p className="text-xs text-amber-700 leading-relaxed italic">{safeStr(result.educationalNote || 'Standard chemical analysis complete.')}</p>
       </section>
     </div>
   );

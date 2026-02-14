@@ -2,17 +2,27 @@
 import { PhysicalProperties, Molecule, SearchResult, Atom, Bond } from "../types";
 
 /**
- * Fetches physical properties and structural data from PubChem.
+ * Fetches physical properties from PubChem using CID for maximum reliability.
  */
 export async function fetchPubChemData(smiles: string): Promise<PhysicalProperties> {
   try {
-    const encodedSmiles = encodeURIComponent(smiles);
-    const url = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/${encodedSmiles}/property/MolecularWeight,XLogP,HBondDonorCount,HBondAcceptorCount,IUPACName,MolecularFormula/JSON`;
+    if (!smiles) return {};
     
-    const response = await fetch(url);
-    if (!response.ok) throw new Error("PubChem lookup failed");
+    // Step 1: Resolve SMILES to CID first (more reliable than direct property lookup via SMILES)
+    const cidLookupUrl = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/${encodeURIComponent(smiles)}/cids/JSON`;
+    const cidResponse = await fetch(cidLookupUrl);
+    if (!cidResponse.ok) return {}; // Silently fail if not found
     
-    const json = await response.json();
+    const cidData = await cidResponse.json();
+    const cid = cidData.IdentifierList?.CID?.[0];
+    if (!cid) return {};
+
+    // Step 2: Fetch properties using the CID
+    const propUrl = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/${cid}/property/MolecularWeight,XLogP,HBondDonorCount,HBondAcceptorCount,IUPACName,MolecularFormula/JSON`;
+    const propResponse = await fetch(propUrl);
+    if (!propResponse.ok) return {};
+    
+    const json = await propResponse.json();
     const props = json.PropertyTable.Properties[0];
 
     return {
@@ -24,7 +34,8 @@ export async function fetchPubChemData(smiles: string): Promise<PhysicalProperti
       meltingPoint: "See PubChem Record"
     };
   } catch (error) {
-    console.error("PubChem fetch error:", error);
+    // Return empty object instead of throwing to maintain app stability
+    console.warn("PubChem enrichment skipped:", error);
     return {};
   }
 }
@@ -34,22 +45,45 @@ export async function fetchPubChemData(smiles: string): Promise<PhysicalProperti
  * This is the primary fallback for Gemini 429 errors.
  */
 export async function resolveMoleculeFromPubChem(query: string): Promise<SearchResult> {
-  // 1. Get CID
-  const nameUrl = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encodeURIComponent(query)}/cids/JSON`;
-  const cidRes = await fetch(nameUrl);
-  if (!cidRes.ok) throw new Error("Could not find molecule in PubChem");
-  const cidJson = await cidRes.json();
-  const cid = cidJson.IdentifierList.CID[0];
+  let cid: number | null = null;
+  
+  // 1. Attempt lookup by Name
+  try {
+    const nameUrl = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encodeURIComponent(query)}/cids/JSON`;
+    const cidRes = await fetch(nameUrl);
+    if (cidRes.ok) {
+      const cidJson = await cidRes.json();
+      cid = cidJson.IdentifierList?.CID?.[0];
+    }
+  } catch (e) {}
 
-  // 2. Get properties and SMILES
+  // 2. Fallback to lookup by SMILES if CID not found
+  if (!cid) {
+    try {
+      const smilesUrl = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/${encodeURIComponent(query)}/cids/JSON`;
+      const cidRes = await fetch(smilesUrl);
+      if (cidRes.ok) {
+        const cidJson = await cidRes.json();
+        cid = cidJson.IdentifierList?.CID?.[0];
+      }
+    } catch (e) {}
+  }
+
+  if (!cid) {
+    throw new Error("Could not find molecule in PubChem. Try a common name or a formal SMILES string.");
+  }
+
+  // 3. Get properties and SMILES
   const propUrl = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/${cid}/property/IUPACName,CanonicalSMILES,MolecularFormula/JSON`;
   const propRes = await fetch(propUrl);
+  if (!propRes.ok) throw new Error("Could not fetch properties from PubChem");
   const propJson = await propRes.json();
   const meta = propJson.PropertyTable.Properties[0];
 
-  // 3. Get 2D JSON for coordinates/graph
+  // 4. Get 2D JSON for coordinates/graph
   const jsonUrl = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/${cid}/JSON`;
   const jsonRes = await fetch(jsonUrl);
+  if (!jsonRes.ok) throw new Error("Could not fetch structure from PubChem");
   const data = await jsonRes.json();
   
   const compound = data.PC_Compounds[0];
@@ -59,19 +93,22 @@ export async function resolveMoleculeFromPubChem(query: string): Promise<SearchR
   // Parse Atoms
   const aid = compound.atoms.aid;
   const elements = compound.atoms.element;
-  const coords = compound.coords[0].conformers[0];
+  const coords = compound.coords?.[0]?.conformers?.[0];
+  
+  if (!aid || !elements || !coords) {
+    throw new Error("PubChem record missing structural coordinates");
+  }
+
   const x = coords.x;
   const y = coords.y;
 
   for (let i = 0; i < aid.length; i++) {
-    // Map atomic numbers to symbols
     const symMap: Record<number, string> = { 6:'C', 1:'H', 8:'O', 7:'N', 9:'F', 17:'Cl', 35:'Br', 53:'I', 15:'P', 16:'S' };
     const element = (symMap[elements[i]] || 'C') as any;
     
     atoms.push({
       id: `pc-${aid[i]}`,
       element,
-      // Scale and center PubChem coords
       x: (x[i] * 40) + 500,
       y: (y[i] * -40) + 400,
       formalCharge: 0,
@@ -98,10 +135,10 @@ export async function resolveMoleculeFromPubChem(query: string): Promise<SearchR
   return {
     molecule: { atoms, bonds },
     metadata: {
-      smiles: meta.CanonicalSMILES,
-      iupacName: meta.IUPACName,
+      smiles: meta.CanonicalSMILES || "",
+      iupacName: meta.IUPACName || query,
       commonName: query,
-      formula: meta.MolecularFormula
+      formula: meta.MolecularFormula || ""
     }
   };
 }
@@ -111,8 +148,16 @@ export async function resolveMoleculeFromPubChem(query: string): Promise<SearchR
  */
 export async function fetch3DSdfFromPubChem(query: string): Promise<string> {
   try {
+    // Try by name first
     const url = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encodeURIComponent(query)}/SDF?record_type=3d`;
-    const res = await fetch(url);
+    let res = await fetch(url);
+    
+    // If name fails, try direct SMILES SDF generation
+    if (!res.ok) {
+        const smilesUrl = `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/${encodeURIComponent(query)}/SDF?record_type=3d`;
+        res = await fetch(smilesUrl);
+    }
+    
     if (!res.ok) return "";
     return await res.text();
   } catch {
