@@ -13,9 +13,11 @@ interface AnalysisPanelProps {
 export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, selectedCentralAtom, onViewAlternative }) => {
   if (loading || !result) return null;
 
-  const vseprKeys = Object.keys(result.vsepr);
-  const displayAtomId = selectedCentralAtom && result.vsepr[selectedCentralAtom] ? selectedCentralAtom : vseprKeys[0];
+  const vseprKeys = Object.keys(result.vsepr || {});
+  const displayAtomId = selectedCentralAtom && result.vsepr && result.vsepr[selectedCentralAtom] ? selectedCentralAtom : vseprKeys[0];
   const activeVSEPR = displayAtomId ? result.vsepr[displayAtomId] : null;
+
+  const hasAlternatives = (result.isomers?.length ?? 0) > 0 || (result.conformations?.length ?? 0) > 0;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pb-12">
@@ -30,7 +32,7 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
         {activeVSEPR ? (
           <div className="grid grid-cols-2 gap-4">
              <GeometryBlock label="AXE Notation" val={activeVSEPR.axeNotation} highlight />
-             <GeometryBlock label="Lone Pairs" val={activeVSEPR.lonePairs.toString()} />
+             <GeometryBlock label="Lone Pairs" val={activeVSEPR.lonePairs?.toString() || '0'} />
              <GeometryBlock label="Electronic Geo" val={activeVSEPR.electronicGeometry} full />
              <GeometryBlock label="Molecular Geo" val={activeVSEPR.molecularGeometry} full blue />
              <GeometryBlock label="Bond Angles" val={activeVSEPR.bondAngles} full />
@@ -42,7 +44,7 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
       <section className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
         <h3 className="text-xs font-black text-blue-600 uppercase tracking-widest mb-6">Stereochemical Logic</h3>
         <div className="space-y-3">
-          {result.stereocenters.length === 0 ? (
+          {!result.stereocenters || result.stereocenters.length === 0 ? (
             <div className="p-4 bg-slate-50 rounded-xl text-center text-xs text-slate-400 italic font-bold">Achiral Molecule</div>
           ) : (
             result.stereocenters.map((sc, i) => (
@@ -58,12 +60,12 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
         </div>
       </section>
 
-      {/* Structural Alternatives - Fix: Render available isomers/conformations using onViewAlternative */}
-      {(result.isomers.length > 0 || result.conformations.length > 0) && (
+      {/* Structural Alternatives */}
+      {hasAlternatives && (
         <section className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm lg:col-span-2">
           <h3 className="text-xs font-black text-blue-600 uppercase tracking-widest mb-6">Structural Alternatives</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {result.isomers.map((iso, i) => (
+            {result.isomers?.map((iso, i) => (
               <div key={`iso-${i}`} className="p-4 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center hover:border-blue-200 transition-colors">
                  <div>
                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">{iso.type}</p>
@@ -77,7 +79,7 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
                  </button>
               </div>
             ))}
-            {result.conformations.map((conf, i) => (
+            {result.conformations?.map((conf, i) => (
               <div key={`conf-${i}`} className="p-4 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center hover:border-blue-200 transition-colors">
                  <div>
                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">Conformational State ({conf.energyScore})</p>
@@ -98,7 +100,7 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
       {/* Educational Context */}
       <section className="bg-amber-50 p-6 rounded-2xl border border-amber-100 lg:col-span-2">
          <h4 className="text-[10px] font-black text-amber-800 uppercase tracking-widest mb-2">Faculty Commentary</h4>
-         <p className="text-xs text-amber-700 leading-relaxed italic">{result.educationalNote}</p>
+         <p className="text-xs text-amber-700 leading-relaxed italic">{result.educationalNote || 'Standard chemical analysis complete.'}</p>
       </section>
     </div>
   );
@@ -107,6 +109,6 @@ export const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ result, loading, s
 const GeometryBlock: React.FC<{ label: string; val: string; full?: boolean; highlight?: boolean; blue?: boolean }> = ({ label, val, full, highlight, blue }) => (
   <div className={`${full ? 'col-span-2' : ''} p-3 rounded-xl bg-slate-50 border border-slate-100`}>
     <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">{label}</p>
-    <p className={`text-xs font-black ${highlight ? 'text-2xl chem-font text-blue-600' : (blue ? 'text-blue-700' : 'text-slate-800')}`}>{val}</p>
+    <p className={`text-xs font-black ${highlight ? 'text-2xl chem-font text-blue-600' : (blue ? 'text-blue-700' : 'text-slate-800')}`}>{val || 'N/A'}</p>
   </div>
 );

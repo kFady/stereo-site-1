@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { resolveMolecule, getSuggestions } from '../services/geminiService';
+import { resolveMoleculeFromPubChem } from '../services/pubchemService';
 import { SearchResult } from '../types';
 
 interface MoleculeSearchProps {
@@ -24,25 +25,40 @@ export const MoleculeSearch: React.FC<MoleculeSearchProps> = ({ onSearchResult }
     }
 
     debounceTimer.current = window.setTimeout(async () => {
-      const results = await getSuggestions(query);
-      setSuggestions(results);
-      if (results.length > 0) setShowDropdown(true);
-    }, 500);
+      try {
+        const results = await getSuggestions(query);
+        setSuggestions(results);
+        if (results.length > 0) setShowDropdown(true);
+      } catch (e) {
+        setSuggestions([]);
+      }
+    }, 700);
 
     return () => { if (debounceTimer.current) window.clearTimeout(debounceTimer.current); };
   }, [query]);
 
   const handleSearch = async (val: string) => {
+    setShowDropdown(false);
+    setSuggestions([]);
+    
     setQuery(val);
-    setShowDropdown(false); // Immediate close as requested
     if (!val.trim()) return;
+    
     setLoading(true);
     try {
+      // 1. Try Gemini
       const result = await resolveMolecule(val);
       onSearchResult(result);
     } catch (e) {
-      console.error(e);
-      alert("Molecule not found. The AI engine might be at capacity.");
+      console.warn("AI Resolution failed, trying PubChem direct fallback...");
+      try {
+        // 2. Fallback to PubChem
+        const result = await resolveMoleculeFromPubChem(val);
+        onSearchResult(result);
+      } catch (pcError) {
+        console.error(pcError);
+        alert("Molecule not found in AI or PubChem databases. Try common names like 'Glucose' or Canonical SMILES.");
+      }
     } finally {
       setLoading(false);
     }
@@ -51,6 +67,7 @@ export const MoleculeSearch: React.FC<MoleculeSearchProps> = ({ onSearchResult }
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       e.preventDefault();
+      setShowDropdown(false);
       handleSearch(query);
     }
   };
@@ -67,7 +84,7 @@ export const MoleculeSearch: React.FC<MoleculeSearchProps> = ({ onSearchResult }
 
   return (
     <div className="flex-grow max-w-2xl mx-4 relative" ref={dropdownRef}>
-      <form onSubmit={(e) => { e.preventDefault(); handleSearch(query); }} className="relative">
+      <form onSubmit={(e) => { e.preventDefault(); handleSearch(query); }} className="relative group">
         <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
           <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -79,7 +96,7 @@ export const MoleculeSearch: React.FC<MoleculeSearchProps> = ({ onSearchResult }
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => { if (suggestions.length) setShowDropdown(true); }}
           onKeyDown={handleKeyDown}
-          placeholder="Enter IUPAC Name, Common Name or SMILES (e.g. Cholesterol, Ibuprofen)"
+          placeholder="Enter Molecule Name or SMILES (e.g. Glucose, Caffeine)"
           className="block w-full pl-12 pr-12 py-3.5 border border-slate-200 rounded-2xl leading-5 bg-slate-50 placeholder-slate-400 focus:outline-none focus:bg-white focus:ring-4 focus:ring-blue-100 focus:border-blue-400 transition-all shadow-sm text-sm font-medium"
           disabled={loading}
         />
@@ -100,8 +117,8 @@ export const MoleculeSearch: React.FC<MoleculeSearchProps> = ({ onSearchResult }
       </form>
 
       {showDropdown && suggestions.length > 0 && (
-        <div className="absolute top-full left-0 w-full mt-3 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[150] overflow-hidden animate-in fade-in slide-in-from-top-4 duration-200">
-          <div className="p-2 border-b border-slate-50 bg-slate-50/50 text-[9px] font-black uppercase tracking-widest text-slate-400 px-4 py-2">Quick Suggestions</div>
+        <div className="absolute top-full left-0 w-full mt-3 bg-white border border-slate-200 rounded-2xl shadow-2xl z-[150] overflow-hidden">
+          <div className="p-2 border-b border-slate-50 bg-slate-50/50 text-[9px] font-black uppercase tracking-widest text-slate-400 px-4 py-2">Quick Results</div>
           {suggestions.map((s, idx) => (
             <button
               key={idx}

@@ -6,7 +6,7 @@ import { Visualizer3D } from './components/Visualizer3D';
 import { MoleculeSearch } from './components/MoleculeSearch';
 import { Molecule, AnalysisResult, ElementType, SearchResult } from './types';
 import { analyzeMolecule, resolveMolecule } from './services/geminiService';
-import { fetchPubChemData } from './services/pubchemService';
+import { fetchPubChemData, resolveMoleculeFromPubChem, fetch3DSdfFromPubChem } from './services/pubchemService';
 
 const App: React.FC = () => {
   const [molecule, setMolecule] = useState<Molecule>({ atoms: [], bonds: [] });
@@ -16,11 +16,11 @@ const App: React.FC = () => {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isFallbackMode, setIsFallbackMode] = useState(false);
   const [selectedCentralAtom, setSelectedCentralAtom] = useState<string | null>(null);
 
   const canvasRef = useRef<MoleculeCanvasHandle>(null);
 
-  // UI State
   const [siteName, setSiteName] = useState('StereoChem PRO');
   const [show2D, setShow2D] = useState(true);
   const [show3D, setShow3D] = useState(true);
@@ -30,60 +30,105 @@ const App: React.FC = () => {
   const handleRunAnalysis = useCallback(async (mol?: Molecule) => {
     const targetMol = mol || molecule;
     if (targetMol.atoms.length === 0) return;
+    
     setIsAnalyzing(true);
     setErrorMsg(null);
+    setIsFallbackMode(false);
+
     try {
+      // 1. Attempt Gemini Analysis
       const result = await analyzeMolecule(targetMol);
-      if (result.metadata.smiles) {
-        try {
-          const realProps = await fetchPubChemData(result.metadata.smiles);
-          result.properties = { ...result.properties, ...realProps };
-        } catch (e) {
-          console.warn("PubChem enrichment failed.", e);
-        }
+      
+      // Enrich with PubChem
+      if (result.metadata?.smiles) {
+        fetchPubChemData(result.metadata.smiles).then(realProps => {
+          setAnalysis(prev => prev ? { ...prev, properties: { ...prev.properties, ...realProps } } : prev);
+        }).catch(() => {});
       }
+      
       setAnalysis(result);
       if (result.metadata) setMetadata(result.metadata);
     } catch (error: any) {
-      const errStr = JSON.stringify(error).toLowerCase();
-      if (errStr.includes('429') || errStr.includes('quota')) {
-        setErrorMsg("API Quota Exceeded. Gemini limits reached. Please try again in 60 seconds.");
+      console.warn("Gemini Analysis failed, attempting PubChem fallback...", error);
+      
+      // 2. Fallback: If we have a name or smiles, get baseline data from PubChem
+      const query = metadata?.iupacName || metadata?.smiles || "";
+      if (query) {
+        try {
+          setIsFallbackMode(true);
+          const [props, sdf] = await Promise.all([
+            fetchPubChemData(query),
+            fetch3DSdfFromPubChem(query)
+          ]);
+          
+          // Construct a partial analysis result
+          const fallbackResult: AnalysisResult = {
+            stereocenters: [],
+            vsepr: {},
+            dipoleMoment: "Available in PubChem record",
+            educationalNote: "AI analysis currently restricted due to quota. Displaying baseline structural and physical data from NIH PubChem databases.",
+            sdfData: sdf,
+            isomers: [],
+            conformations: [],
+            properties: props,
+            metadata: metadata!
+          };
+          setAnalysis(fallbackResult);
+          setErrorMsg("AI Analysis Limit Reached. Showing Baseline PubChem Data.");
+        } catch (fallbackError) {
+          setErrorMsg("Analysis failed. Quota reached and fallback resolution failed.");
+        }
       } else {
-        setErrorMsg("Analysis failed. Try a simpler structure or check connectivity.");
+        setErrorMsg("Analysis failed. Quota reached and no reference name found for fallback.");
       }
     } finally {
       setIsAnalyzing(false);
     }
-  }, [molecule]);
+  }, [molecule, metadata]);
 
   const onSearchResult = useCallback((result: SearchResult) => {
+    if (!result || !result.molecule) return;
     setMolecule(result.molecule);
-    setMetadata(result.metadata);
+    setMetadata(result.metadata || null);
     setAnalysis(null);
     setSelectedCentralAtom(null);
     setErrorMsg(null);
+    setIsFallbackMode(false);
+    
     setTimeout(() => {
       canvasRef.current?.centerMolecule();
       handleRunAnalysis(result.molecule);
-    }, 150);
+    }, 300);
   }, [handleRunAnalysis]);
 
-  const handleViewAlternative = useCallback(async (smiles: string) => {
+  const handleSearchSubmit = useCallback(async (query: string) => {
+    setIsAnalyzing(true);
+    setErrorMsg(null);
     try {
-      setIsAnalyzing(true);
-      setErrorMsg(null);
-      const result = await resolveMolecule(smiles);
+      // Try Gemini first
+      const result = await resolveMolecule(query);
       onSearchResult(result);
-    } catch (error: any) {
-      setErrorMsg("Failed to resolve structure.");
+    } catch (e) {
+      console.warn("Search via Gemini failed, trying PubChem direct...");
+      try {
+        const result = await resolveMoleculeFromPubChem(query);
+        onSearchResult(result);
+        setErrorMsg("Gemini Offline. Molecule resolved via PubChem.");
+      } catch (pcError) {
+        setErrorMsg("Molecule not found in AI or PubChem databases.");
+      }
     } finally {
       setIsAnalyzing(false);
     }
   }, [onSearchResult]);
 
+  // Fix: Added handleViewAlternative to process isomer/conformer SMILES navigation
+  const handleViewAlternative = useCallback((smiles: string) => {
+    handleSearchSubmit(smiles);
+  }, [handleSearchSubmit]);
+
   return (
     <div className="min-h-screen flex flex-col bg-[#f8fafc] select-none text-slate-800">
-      {/* Menu Bar - Fixed Top */}
       <nav className="bg-[#e2e8f0] border-b border-slate-300 h-9 flex items-center px-4 space-x-6 text-[10px] font-bold text-slate-600 uppercase tracking-widest z-[100] shrink-0">
         <div className="flex items-center space-x-2 mr-4">
           <div className="w-3.5 h-3.5 bg-blue-600 rounded-sm"></div>
@@ -91,7 +136,7 @@ const App: React.FC = () => {
         </div>
         <div className="flex space-x-4 h-full">
           <MenuDropdown label="File">
-             <button onClick={() => { setMolecule({atoms:[], bonds:[]}); setAnalysis(null); }} className="w-full text-left px-4 py-2 hover:bg-blue-600 hover:text-white border-b border-slate-100 transition-colors">New Structure</button>
+             <button onClick={() => { setMolecule({atoms:[], bonds:[]}); setAnalysis(null); setMetadata(null); }} className="w-full text-left px-4 py-2 hover:bg-blue-600 hover:text-white border-b border-slate-100 transition-colors">New Structure</button>
              <button onClick={() => window.print()} className="w-full text-left px-4 py-2 hover:bg-blue-600 hover:text-white transition-colors">Print View</button>
           </MenuDropdown>
           <MenuDropdown label="Edit">
@@ -99,8 +144,6 @@ const App: React.FC = () => {
                const name = prompt("Rename Project:", siteName);
                if(name) setSiteName(name);
              }} className="w-full text-left px-4 py-2 hover:bg-blue-600 hover:text-white border-b border-slate-100 transition-colors">Rename Project</button>
-             <button className="w-full text-left px-4 py-2 text-slate-400 cursor-not-allowed border-b border-slate-50">Undo (Ctrl+Z)</button>
-             <button className="w-full text-left px-4 py-2 text-slate-400 cursor-not-allowed">Redo (Ctrl+Y)</button>
           </MenuDropdown>
           <MenuDropdown label="View">
              <button onClick={() => canvasRef.current?.centerMolecule()} className="w-full text-left px-4 py-2 hover:bg-blue-600 hover:text-white border-b border-slate-100 transition-colors">Center View</button>
@@ -116,25 +159,22 @@ const App: React.FC = () => {
         </div>
       </nav>
 
-      {/* Main Container - Natural Scroll */}
       <div className="flex-grow flex flex-col overflow-y-auto">
-        {/* Error Alert */}
         {errorMsg && (
-          <div className="bg-red-600 text-white text-[10px] font-black uppercase px-6 py-3 flex justify-between items-center shadow-lg animate-in slide-in-from-top duration-300">
+          <div className={`${isFallbackMode ? 'bg-amber-600' : 'bg-red-600'} text-white text-[10px] font-black uppercase px-6 py-3 flex justify-between items-center shadow-lg animate-in slide-in-from-top duration-300 sticky top-0 z-[120]`}>
             <div className="flex items-center space-x-4">
-              <span className="animate-pulse">⚠ {errorMsg}</span>
-              <button 
-                onClick={() => handleRunAnalysis()}
-                className="bg-white text-red-600 px-4 py-1.5 rounded-lg hover:bg-slate-100 active:scale-95 transition-all shadow-sm"
-              >
-                Manual Retry
-              </button>
+              <span className="flex items-center">
+                <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {errorMsg}
+              </span>
+              {!isFallbackMode && <button onClick={() => handleRunAnalysis()} className="bg-white text-red-600 px-4 py-1.5 rounded-lg font-bold">Retry AI</button>}
             </div>
-            <button onClick={() => setErrorMsg(null)} className="p-1 hover:bg-red-500 rounded-md transition-colors text-lg">✕</button>
+            <button onClick={() => setErrorMsg(null)} className="p-1 hover:bg-black/10 rounded-md">✕</button>
           </div>
         )}
 
-        {/* Header Section - Non-Sticky */}
         <header className="bg-white border-b border-slate-200 px-4 md:px-12 py-6 flex flex-col md:flex-row items-center gap-6 shadow-sm shrink-0">
           <MoleculeSearch onSearchResult={onSearchResult} />
           <button 
@@ -142,22 +182,23 @@ const App: React.FC = () => {
             disabled={isAnalyzing || molecule.atoms.length === 0}
             className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white px-10 py-3 rounded-2xl text-[11px] font-black uppercase tracking-[0.1em] shadow-xl shadow-blue-200 flex items-center transition-all active:scale-95 shrink-0"
           >
-            {isAnalyzing && <div className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full mr-3"></div>}
-            {isAnalyzing ? "Processing..." : "Run Analysis"}
+            {isAnalyzing ? (
+              <>
+                <div className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full mr-3"></div>
+                Computing...
+              </>
+            ) : "Run Analysis"}
           </button>
         </header>
 
-        {/* Viewports */}
         <main className="p-4 md:p-8 space-y-8 max-w-[1600px] mx-auto w-full">
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 h-auto xl:h-[700px]">
             {show2D && (
-              <div className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50 flex flex-col overflow-hidden h-[600px] xl:h-full relative group transition-all">
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-xl flex flex-col overflow-hidden h-[600px] xl:h-full relative transition-all">
                 <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                  <h2 className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Skeletal Editor</h2>
-                  <div className="flex space-x-2">
-                     <span className="w-2.5 h-2.5 rounded-full bg-red-400"></span>
-                     <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
-                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                  <div className="flex items-center space-x-3">
+                    <h2 className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Skeletal Editor</h2>
+                    {isFallbackMode && <span className="bg-amber-100 text-amber-700 text-[8px] font-black px-2 py-0.5 rounded-md uppercase tracking-tighter">PubChem Source</span>}
                   </div>
                 </div>
                 <MoleculeCanvas 
@@ -175,9 +216,10 @@ const App: React.FC = () => {
             )}
 
             {show3D && (
-              <div className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50 flex flex-col overflow-hidden h-[600px] xl:h-full transition-all">
-                <div className="bg-slate-50 px-6 py-4 border-b border-slate-200">
-                  <span className="text-[10px] font-black uppercase text-slate-500 tracking-widest">3D Spatial Projection</span>
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-xl flex flex-col overflow-hidden h-[600px] xl:h-full transition-all">
+                <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex justify-between">
+                  <span className="text-[10px] font-black uppercase text-slate-500 tracking-widest">3D Dynamics</span>
+                  {isAnalyzing && <div className="animate-pulse text-[10px] text-blue-500 font-bold">GENERATING COORDINATES...</div>}
                 </div>
                 <div className="flex-grow">
                   <Visualizer3D sdfData={analysis?.sdfData} />
@@ -186,37 +228,35 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {/* Analysis & Properties Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 pb-20">
              <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
-               <h3 className="text-xs font-black uppercase text-blue-600 mb-6 tracking-widest border-b border-blue-50 pb-2">Molecular Nomenclature</h3>
+               <h3 className="text-xs font-black uppercase text-blue-600 mb-6 tracking-widest border-b border-blue-50 pb-2">Identification</h3>
                <div className="grid grid-cols-2 gap-x-10 gap-y-6">
-                 <InfoItem label="IUPAC Identifier" value={metadata?.iupacName} full />
-                 <InfoItem label="Common Trivial Name" value={metadata?.commonName} />
-                 <InfoItem label="Hill Formula" value={metadata?.formula} />
-                 <InfoItem label="Canonical SMILES" value={metadata?.smiles} full code />
+                 <InfoItem label="IUPAC Name" value={metadata?.iupacName} full />
+                 <InfoItem label="Formula" value={metadata?.formula} />
+                 <InfoItem label="SMILES" value={metadata?.smiles} full code />
                </div>
              </div>
 
              {showProperties && (
                <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
-                  <h3 className="text-xs font-black uppercase text-blue-600 mb-6 tracking-widest border-b border-blue-50 pb-2">Thermodynamics</h3>
+                  <h3 className="text-xs font-black uppercase text-blue-600 mb-6 tracking-widest border-b border-blue-50 pb-2">Properties</h3>
                   <div className="space-y-4">
-                     <PropertyRow label="Molecular Weight" value={analysis?.properties?.molecularWeight} />
-                     <PropertyRow label="Hydrophobicity (logP)" value={analysis?.properties?.logP} />
-                     <PropertyRow label="Melting Point (Est.)" value={analysis?.properties?.meltingPoint} />
-                     <PropertyRow label="Boiling Point (Est.)" value={analysis?.properties?.boilingPoint} />
+                     <PropertyRow label="Mol. Weight" value={analysis?.properties?.molecularWeight} />
+                     <PropertyRow label="LogP" value={analysis?.properties?.logP} />
+                     <PropertyRow label="Melting Point" value={analysis?.properties?.meltingPoint} />
+                     <PropertyRow label="Boiling Point" value={analysis?.properties?.boilingPoint} />
                   </div>
                </div>
              )}
 
              <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
-                <h3 className="text-xs font-black uppercase text-blue-600 mb-6 tracking-widest border-b border-blue-50 pb-2">Topology Stats</h3>
+                <h3 className="text-xs font-black uppercase text-blue-600 mb-6 tracking-widest border-b border-blue-50 pb-2">Topology</h3>
                 <div className="space-y-4">
-                   <PropertyRow label="Node Count" value={molecule.atoms.length.toString()} />
-                   <PropertyRow label="Edge Count" value={molecule.bonds.length.toString()} />
-                   <PropertyRow label="Stereocenter Count" value={analysis?.stereocenters.length.toString()} />
-                   <PropertyRow label="Dipole Vector" value={analysis?.dipoleMoment} />
+                   <PropertyRow label="Atoms" value={molecule.atoms.length.toString()} />
+                   <PropertyRow label="Bonds" value={molecule.bonds.length.toString()} />
+                   <PropertyRow label="Stereocenters" value={analysis?.stereocenters?.length?.toString() || '0'} />
+                   <PropertyRow label="Dipole" value={analysis?.dipoleMoment} />
                 </div>
              </div>
 
@@ -236,12 +276,10 @@ const App: React.FC = () => {
       
       <footer className="h-7 bg-slate-900 text-white flex items-center px-6 justify-between text-[9px] font-bold uppercase tracking-widest shrink-0">
         <div className="flex space-x-10">
-          <span className="text-slate-400">Project: {siteName}</span>
-          <span>Status: AI Logic Engine Online</span>
-        </div>
-        <div className="flex space-x-4 items-center">
-          <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
-          <span>v4.6.0 Stable</span>
+          <span>{molecule.atoms.length} Atoms detected</span>
+          <span className="flex items-center">
+            {isFallbackMode ? "Mode: PubChem Baseline (NIH)" : "Mode: Gemini AI-Flash"}
+          </span>
         </div>
       </footer>
     </div>
@@ -260,14 +298,14 @@ const MenuDropdown: React.FC<{ label: string; children: React.ReactNode }> = ({ 
 const WindowToggle: React.FC<{ label: string; active: boolean; onClick: () => void }> = ({ label, active, onClick }) => (
   <button onClick={onClick} className="w-full text-left px-5 py-2.5 hover:bg-blue-600 hover:text-white flex justify-between items-center text-xs border-b border-slate-50 last:border-0 transition-colors">
     {label}
-    <div className={`w-2.5 h-2.5 rounded-full ${active ? 'bg-blue-600 ring-2 ring-white ring-offset-1' : 'bg-slate-200'}`}></div>
+    <div className={`w-2.5 h-2.5 rounded-full ${active ? 'bg-blue-600' : 'bg-slate-200'}`}></div>
   </button>
 );
 
 const InfoItem: React.FC<{ label: string; value?: string; full?: boolean; code?: boolean }> = ({ label, value, full, code }) => (
   <div className={`${full ? 'col-span-2' : ''} border-b border-slate-50 pb-2`}>
-    <p className="text-[8px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1">{label}</p>
-    <p className={`text-xs font-bold text-slate-700 leading-tight ${code ? 'chem-font break-all text-blue-600 bg-slate-50 p-1 rounded border border-slate-100' : ''}`}>{value || '--'}</p>
+    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">{label}</p>
+    <p className={`text-xs font-bold text-slate-700 leading-tight ${code ? 'chem-font break-all text-blue-600' : ''}`}>{value || '--'}</p>
   </div>
 );
 

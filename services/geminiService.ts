@@ -4,58 +4,84 @@ import { Molecule, AnalysisResult, SearchResult } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-const explanationCache: Record<string, string> = {};
-const resolutionCache: Record<string, SearchResult> = {};
+const CACHE_PREFIX = 'stereochem_v5_';
+
+const cache = {
+  get: (key: string) => {
+    try {
+      const item = localStorage.getItem(CACHE_PREFIX + key);
+      return item ? JSON.parse(item) : null;
+    } catch { return null; }
+  },
+  set: (key: string, val: any) => {
+    try {
+      localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(val));
+    } catch { }
+  }
+};
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function withRetry<T>(fn: () => Promise<T>, retries = 5, delay = 3500): Promise<T> {
+/**
+ * Robust retry mechanism with exponential backoff specifically for 429 errors.
+ */
+async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 2000): Promise<T> {
   try {
     return await fn();
   } catch (error: any) {
-    const errorString = JSON.stringify(error).toLowerCase();
-    const isRateLimit = 
-      error?.message?.includes('429') || 
-      error?.status === 'RESOURCE_EXHAUSTED' ||
-      errorString.includes('429') ||
-      errorString.includes('quota');
+    const errorStr = JSON.stringify(error).toLowerCase();
+    const isRateLimit = errorStr.includes('429') || errorStr.includes('resource_exhausted');
 
     if (retries > 0 && isRateLimit) {
-      const jitter = Math.floor(Math.random() * 1500) + 1000;
-      console.warn(`Gemini API Quota alert. Cooling down... Retrying in ${delay + jitter}ms.`);
-      await wait(delay + jitter);
-      return withRetry(fn, retries - 1, delay * 1.8);
+      // Use longer delays for quota limits
+      const backoffDelay = delay + Math.floor(Math.random() * 1000);
+      console.warn(`Quota limit reached. Retrying in ${backoffDelay}ms...`);
+      await wait(backoffDelay);
+      return withRetry(fn, retries - 1, delay * 2.5);
     }
     throw error;
   }
 }
 
 export async function getSuggestions(input: string): Promise<string[]> {
-  if (input.length < 2) return [];
+  const query = input.trim().toLowerCase();
+  if (query.length < 2) return [];
+
   return withRetry(async () => {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `List 5 chemical names/SMILES for input "${input}". Return JSON array.`,
-      config: { responseMimeType: "application/json" }
+      contents: `List 5 chemical names/SMILES starting with "${input}".`,
+      config: { 
+        responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 }
+      }
     });
     try {
-      const data = JSON.parse(response.text);
+      const data = JSON.parse(response.text || '[]');
       return Array.isArray(data) ? data : [];
     } catch { return []; }
-  }, 2, 1500);
+  }, 1, 1000);
 }
 
 export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResult> {
-  return withRetry(async () => {
-    const prompt = `Act as an expert chemical logic engine. 
-    Analyze this structure: ${JSON.stringify({ atoms: molecule.atoms, bonds: molecule.bonds })}
-    Output: IUPAC name, SMILES, R/S configurations for all centers, VSEPR for non-H atoms, Predicted LogP/MW, and a valid 3D SDF string.`;
+  const moleculeKey = btoa(JSON.stringify(molecule)).slice(0, 48);
+  const cached = cache.get(`analysis_${moleculeKey}`);
+  if (cached) return cached;
 
+  return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: "gemini-3-pro-preview",
-      contents: prompt,
+      model: "gemini-3-flash-preview",
+      contents: `Analyze 2D molecular graph: ${JSON.stringify({ atoms: molecule.atoms, bonds: molecule.bonds })}.
+      
+      MANDATORY:
+      1. Provide accurate IUPAC/SMILES.
+      2. For cyclic structures (e.g. cyclohexane), include stable conformations.
+      3. Return a perfectly valid 3D SDF string in 'sdfData'.
+      4. List stereocenters and VSEPR data for each heavy atom.`,
       config: {
+        systemInstruction: "You are a professional chemical informatics engine. Always respond in valid JSON. The 'sdfData' field MUST contain a raw V2000 SDF string without markdown code blocks. Ensure coordinates reflect 3D geometry.",
         responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -86,7 +112,7 @@ export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResul
             },
             dipoleMoment: { type: Type.STRING },
             educationalNote: { type: Type.STRING },
-            sdfData: { type: Type.STRING },
+            sdfData: { type: Type.STRING, description: "Raw V2000 SDF string" },
             isomers: {
               type: Type.ARRAY,
               items: {
@@ -117,8 +143,7 @@ export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResul
                 molecularWeight: { type: Type.STRING },
                 logP: { type: Type.STRING },
                 boilingPoint: { type: Type.STRING },
-                meltingPoint: { type: Type.STRING },
-                density: { type: Type.STRING }
+                meltingPoint: { type: Type.STRING }
               }
             },
             metadata: {
@@ -135,26 +160,37 @@ export async function analyzeMolecule(molecule: Molecule): Promise<AnalysisResul
       }
     });
 
-    const rawData = JSON.parse(response.text);
+    const rawData = JSON.parse(response.text || '{}');
     const vseprRecord: Record<string, any> = {};
     if (Array.isArray(rawData.vsepr)) {
       rawData.vsepr.forEach((item: any) => vseprRecord[item.atomId] = item);
     }
-    return { ...rawData, vsepr: vseprRecord };
-  });
+    
+    const result = { 
+      ...rawData, 
+      vsepr: vseprRecord,
+      isomers: rawData.isomers || [],
+      conformations: rawData.conformations || [],
+      stereocenters: rawData.stereocenters || []
+    };
+
+    cache.set(`analysis_${moleculeKey}`, result);
+    return result;
+  }, 2, 3000);
 }
 
 export async function resolveMolecule(query: string): Promise<SearchResult> {
   const normalized = query.trim().toLowerCase();
-  if (resolutionCache[normalized]) return resolutionCache[normalized];
+  const cached = cache.get(`resolve_${normalized}`);
+  if (cached) return cached;
 
   return withRetry(async () => {
-    const prompt = `Convert chemical "${query}" to a 2D graph with atoms and bonds. Center coordinates at (500,400). Standard bond length 55. Return SearchResult JSON.`;
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: prompt,
-      config: {
+      contents: `Convert chemical name or SMILES "${query}" to a 2D skeletal graph (JSON atoms/bonds).`,
+      config: { 
         responseMimeType: "application/json",
+        thinkingConfig: { thinkingBudget: 0 },
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -169,9 +205,7 @@ export async function resolveMolecule(query: string): Promise<SearchResult> {
                       id: { type: Type.STRING },
                       element: { type: Type.STRING },
                       x: { type: Type.NUMBER },
-                      y: { type: Type.NUMBER },
-                      formalCharge: { type: Type.NUMBER },
-                      lonePairs: { type: Type.NUMBER }
+                      y: { type: Type.NUMBER }
                     }
                   }
                 },
@@ -194,7 +228,6 @@ export async function resolveMolecule(query: string): Promise<SearchResult> {
               properties: {
                 smiles: { type: Type.STRING },
                 iupacName: { type: Type.STRING },
-                commonName: { type: Type.STRING },
                 formula: { type: Type.STRING }
               }
             }
@@ -202,21 +235,24 @@ export async function resolveMolecule(query: string): Promise<SearchResult> {
         }
       }
     });
-    const result = JSON.parse(response.text);
-    resolutionCache[normalized] = result;
+    const result = JSON.parse(response.text || '{}');
+    cache.set(`resolve_${normalized}`, result);
     return result;
-  });
+  }, 1, 1000);
 }
 
 export async function getExplanation(topic: string): Promise<string> {
-  if (explanationCache[topic]) return explanationCache[topic];
+  const cached = cache.get(`explain_${topic}`);
+  if (cached) return cached;
+
   return withRetry(async () => {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Explain "${topic}" for a chemist in 2 sentences.`,
+      contents: `Briefly explain "${topic}".`,
+      config: { thinkingConfig: { thinkingBudget: 0 } }
     });
-    const txt = response.text || "Reference unavailable.";
-    explanationCache[topic] = txt;
+    const txt = response.text || "Information unavailable.";
+    cache.set(`explain_${topic}`, txt);
     return txt;
   });
 }
